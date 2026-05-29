@@ -354,8 +354,10 @@ item, so a restarted worker at position 0 cannot silently accept work for
 position N; it reports the mismatch and the coordinator replays the current
 transcript. Ctrl+C in the CLI and agent is cooperative: DS4 waits for the
 current distributed token or prefill chunk to drain before returning control,
-which avoids coordinator-caused KV splits. Persistent distributed KV checkpoints
-for saved agent/server sessions are not implemented yet.
+which avoids coordinator-caused KV splits. Saved agent/server sessions use the
+same KV file format as single-machine sessions: during save the coordinator
+fetches worker-owned layer tensors and serializes one normal payload; during
+load it splits that payload over the currently registered route.
 
 ### Distributed protocol overview
 
@@ -372,7 +374,10 @@ coordinator, or ACKs for non-final prefill chunks so the prefill pipeline can
 stay full. `RESULT` frames echo the request ID and the post-span hash. A worker
 status error is handled differently from a socket failure: KV/hash mismatch can
 be recovered by replaying the token history on the same route, while transport
-failure drops the route and waits for a replacement worker. The protocol has no
+failure drops the route and waits for a replacement worker. For persistent KV,
+the coordinator opens worker data connections and sends snapshot save/load
+messages for each worker-owned layer range; the disk payload remains a single
+agent/server cache file. The protocol has no
 encryption or authentication, and is not release-stable yet; coordinator and
 workers should be built from the same commit and used on trusted machines and
 trusted networks.
@@ -986,7 +991,7 @@ The DS4 session payload starts with thirteen little-endian `u32` fields:
 
 ```text
 0   magic = "DSV4"
-1   payload version = 1
+1   payload version = 2
 2   saved context size
 3   prefill chunk size
 4   raw KV ring capacity
@@ -1019,6 +1024,12 @@ snapshot can sample or continue from the exact next-token distribution without
 running one extra decode step. MTP draft logits/state are not persisted; after
 loading a disk checkpoint the draft state is invalidated and rebuilt by normal
 generation.
+
+Distributed coordinator sessions use the same `DSV4` payload. Worker-owned
+layer tensors are pulled during save and merged into the normal layer-ordered
+tensor stream; during load the coordinator splits that stream into the current
+route and pushes the relevant layer tensors back to the workers. The saved file
+does not retain the distributed topology.
 
 The tensor payload is DS4-specific KV/session state, not a generic inference
 graph dump. It is expected to be portable only across compatible `ds4.c`

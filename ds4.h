@@ -126,6 +126,11 @@ typedef struct {
     uint64_t cap;
 } ds4_session_snapshot;
 
+typedef struct {
+    char *path;
+    uint64_t bytes;
+} ds4_session_payload_file;
+
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt);
 void ds4_engine_close(ds4_engine *e);
 void ds4_engine_summary(ds4_engine *e);
@@ -134,6 +139,7 @@ int ds4_engine_power(ds4_engine *e);
 int ds4_engine_set_power(ds4_engine *e, int power_percent);
 const char *ds4_engine_model_name(ds4_engine *e);
 int ds4_engine_layer_count(ds4_engine *e);
+uint32_t ds4_engine_layer_compress_ratio(ds4_engine *e, uint32_t layer);
 uint64_t ds4_engine_hidden_f32_values(ds4_engine *e);
 /* Stable id for cache compatibility.  0 is the original Flash shape, so old
  * KV files with the previously-zero reserved byte remain Flash-compatible;
@@ -198,6 +204,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size);
 void ds4_session_free(ds4_session *s);
 int ds4_session_power(ds4_session *s);
 int ds4_session_set_power(ds4_session *s, int power_percent);
+bool ds4_session_is_distributed(ds4_session *s);
 void ds4_session_set_progress(ds4_session *s, ds4_session_progress_fn fn, void *ud);
 /* UI-only progress. It may report fine-grained progress inside a prefill chunk;
  * callers must not treat it as a durable KV checkpoint boundary. */
@@ -232,6 +239,7 @@ int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k);
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out);
 int ds4_session_copy_logits(ds4_session *s, float *out, int cap);
+int ds4_session_set_logits(ds4_session *s, const float *logits, int n);
 int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen);
 int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                                         int max_tokens, int eos_token,
@@ -271,11 +279,35 @@ int ds4_session_eval_output_head_from_hc(ds4_session *s,
 
 /* Disk KV payload helpers.  HTTP/agent code owns the outer file header and
  * persistence policy; the engine owns the DS4-specific serialized graph state. */
+#define DS4_SESSION_PAYLOAD_MAGIC UINT32_C(0x34565344) /* "DSV4" */
+#define DS4_SESSION_PAYLOAD_VERSION UINT32_C(2)
+#define DS4_SESSION_PAYLOAD_U32_FIELDS 13u
+#define DS4_SESSION_LAYER_PAYLOAD_MAGIC UINT32_C(0x4c565344) /* "DSVL" */
+#define DS4_SESSION_LAYER_PAYLOAD_VERSION UINT32_C(1)
+#define DS4_SESSION_LAYER_PAYLOAD_U32_FIELDS 14u
+
 uint64_t ds4_session_payload_bytes(ds4_session *s);
+int ds4_session_stage_payload(ds4_session *s, ds4_session_payload_file *out,
+                              char *err, size_t errlen);
+int ds4_session_write_staged_payload(const ds4_session_payload_file *payload,
+                                     FILE *fp, char *err, size_t errlen);
+void ds4_session_payload_file_free(ds4_session_payload_file *payload);
 int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen);
 int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, char *err, size_t errlen);
 int ds4_session_save_snapshot(ds4_session *s, ds4_session_snapshot *snap, char *err, size_t errlen);
 int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, char *err, size_t errlen);
 void ds4_session_snapshot_free(ds4_session_snapshot *snap);
+
+uint64_t ds4_session_layer_payload_bytes(ds4_session *s,
+                                         uint32_t layer_start,
+                                         uint32_t layer_end);
+int ds4_session_save_layer_payload(ds4_session *s, FILE *fp,
+                                   uint32_t layer_start, uint32_t layer_end,
+                                   char *err, size_t errlen);
+int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
+                                   uint64_t payload_bytes,
+                                   const int *tokens, uint32_t n_tokens,
+                                   uint32_t layer_start, uint32_t layer_end,
+                                   char *err, size_t errlen);
 
 #endif

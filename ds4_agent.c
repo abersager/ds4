@@ -3768,12 +3768,16 @@ static bool agent_kv_save_path(agent_worker *w, const char *path,
         ds4_kvstore_sha1_bytes_hex(text, text_len, sha);
     if (sha_out) memcpy(sha_out, sha, sizeof(sha));
 
-    uint64_t payload_bytes = ds4_session_payload_bytes(w->session);
-    if (payload_bytes == 0) {
-        snprintf(err, err_len, "session has no valid KV payload");
+    ds4_session_payload_file staged = {0};
+    char save_err[160] = {0};
+    if (ds4_session_stage_payload(w->session, &staged,
+                                  save_err, sizeof(save_err)) != 0) {
+        snprintf(err, err_len, "%s",
+                 save_err[0] ? save_err : "session has no valid KV payload");
         free(text);
         return false;
     }
+    uint64_t payload_bytes = staged.bytes;
 
     agent_buf tmpl = {0};
     agent_buf_puts(&tmpl, path);
@@ -3782,6 +3786,7 @@ static bool agent_kv_save_path(agent_worker *w, const char *path,
     int fd = mkstemp(tmp);
     if (fd < 0) {
         snprintf(err, err_len, "%s", strerror(errno));
+        ds4_session_payload_file_free(&staged);
         free(tmp);
         free(text);
         return false;
@@ -3792,6 +3797,7 @@ static bool agent_kv_save_path(agent_worker *w, const char *path,
         snprintf(err, err_len, "%s", strerror(errno));
         close(fd);
         unlink(tmp);
+        ds4_session_payload_file_free(&staged);
         free(tmp);
         free(text);
         return false;
@@ -3807,13 +3813,12 @@ static bool agent_kv_save_path(agent_worker *w, const char *path,
     uint8_t tb[4];
     ds4_kvstore_le_put32(tb, (uint32_t)text_len);
 
-    char save_err[160] = {0};
     errno = 0;
     bool ok = fwrite(h, 1, sizeof(h), fp) == sizeof(h) &&
               fwrite(tb, 1, sizeof(tb), fp) == sizeof(tb) &&
               fwrite(text, 1, text_len, fp) == text_len &&
-              ds4_session_save_payload(w->session, fp,
-                                       save_err, sizeof(save_err)) == 0 &&
+              ds4_session_write_staged_payload(&staged, fp,
+                                               save_err, sizeof(save_err)) == 0 &&
               (!session_identity ||
                agent_kv_write_title_trailer(fp, session_title,
                                             save_err, sizeof(save_err))) &&
@@ -3834,6 +3839,7 @@ static bool agent_kv_save_path(agent_worker *w, const char *path,
         unlink(tmp);
     }
 
+    ds4_session_payload_file_free(&staged);
     free(tmp);
     free(text);
     return ok;
@@ -4083,6 +4089,55 @@ static bool agent_worker_reset_to_sysprompt(agent_worker *w, char *err, size_t e
     free(text);
     ds4_tokens_free(&sys);
     return true;
+}
+
+static bool agent_worker_should_stop(agent_worker *w) {
+    pthread_mutex_lock(&w->mu);
+    bool stop = w->stop;
+    pthread_mutex_unlock(&w->mu);
+    return stop;
+}
+
+static bool agent_worker_wait_distributed_route(agent_worker *w, char *err, size_t err_len) {
+    if (!w || !w->cfg ||
+        w->cfg->engine.distributed.role != DS4_DISTRIBUTED_COORDINATOR)
+        return true;
+
+    char last[160] = {0};
+    unsigned ticks = 0;
+    const struct timespec delay = {0, 250000000L};
+    for (;;) {
+        int ready = ds4_session_distributed_route_ready(w->session, err, err_len);
+        if (ready > 0) {
+            if (ticks != 0) {
+                if (w->cfg->non_interactive)
+                    fprintf(stderr, "ds4-agent: distributed route ready\n");
+                else
+                    agent_publish_system_status(w, "Distributed route ready.");
+            }
+            if (err_len) err[0] = '\0';
+            return true;
+        }
+        if (ready < 0) return false;
+
+        const char *why = err && err[0] ? err : "route incomplete";
+        if (strcmp(last, why) != 0 || (ticks % 20u) == 0) {
+            if (w->cfg->non_interactive) {
+                fprintf(stderr, "ds4-agent: waiting for distributed route: %s\n", why);
+            } else {
+                char msg[224];
+                snprintf(msg, sizeof(msg), "Waiting for distributed route: %s", why);
+                agent_publish_system_status(w, msg);
+            }
+            snprintf(last, sizeof(last), "%s", why);
+        }
+        if (agent_worker_should_stop(w)) {
+            snprintf(err, err_len, "agent stopped while waiting for distributed route");
+            return false;
+        }
+        nanosleep(&delay, NULL);
+        ticks++;
+    }
 }
 
 static bool agent_worker_has_user_session(agent_worker *w) {
@@ -7561,7 +7616,8 @@ static void *worker_main(void *arg) {
                 w->cfg->engine.model_path ? w->cfg->engine.model_path : "",
                 w->cfg->gen.trace_path ? w->cfg->gen.trace_path : "");
     char init_err[160] = {0};
-    if (!agent_worker_reset_to_sysprompt(w, init_err, sizeof(init_err))) {
+    if (!agent_worker_wait_distributed_route(w, init_err, sizeof(init_err)) ||
+        !agent_worker_reset_to_sysprompt(w, init_err, sizeof(init_err))) {
         agent_set_error(w, init_err[0] ? init_err : "failed to initialize system prompt");
     }
     agent_trace_tokens(w, "initial_system_prompt", &w->transcript, 0);
