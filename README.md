@@ -152,6 +152,45 @@ make cpu              # CPU-only diagnostics build
 select another supported GGUF from `./gguf/`. Run `./ds4 --help` and
 `./ds4-server --help` for the full flag list.
 
+## Friendly TUI (ds4-ui)
+
+If you would rather not juggle scripts and flags, `make` also builds `./ds4-ui`,
+a small terminal UI that wraps the common workflow. It is a thin, dependency-free
+front end: no inference happens in it, it just drives the existing pieces.
+
+```sh
+./ds4-ui
+```
+
+It has three screens:
+
+* **Models** — browse the downloadable catalog, see what is already installed,
+  start a download (with a live progress bar; it shells out to
+  `download_model.sh`), enter a Hugging Face token for gated files, and pick the
+  active `./ds4flash.gguf`.
+* **Server** — an editable list of the common `ds4-server` options (context
+  length, max output tokens, host/port, on-disk KV cache dir and size, MTP,
+  threads, SSD streaming). Up/Down selects a field, Enter/`e` edits it; each field
+  shows its `--flag` and a short hint. Then start/stop `./ds4-server` as a managed
+  child process and watch its log until it reports `listening on ...`.
+* **Claude Code** — with the server running, press `c` to point the default
+  `claude` command at your local server, and `r` (or stopping the server, or
+  quitting) to put Claude Code **back to normal**.
+
+The Claude Code binding works by writing the same environment block described in
+[Agent Client Usage](#agent-client-usage) into an `"env"` object in
+`~/.claude/settings.json`. The original file is snapshotted first, a private
+`_ds4_managed` marker records exactly what was injected, and disconnecting
+removes only those keys (restoring any values you had before). The binding is
+tied to the server lifecycle, so it is always cleaned up — even on an unexpected
+exit, the next `./ds4-ui` launch (or `./ds4-ui --restore`) repairs it. Edits to
+`settings.json` only affect new `claude` launches, never a session already
+running.
+
+Non-interactive helpers: `./ds4-ui --status` prints the active model and whether
+Claude Code is currently routed to ds4; `./ds4-ui --restore` unbinds Claude Code
+and exits.
+
 ## Speed
 
 These are single-run Metal CLI numbers with `--ctx 32768`, `--nothink`, greedy
